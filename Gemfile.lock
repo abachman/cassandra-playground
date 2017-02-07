@@ -1,0 +1,21 @@
+GEM
+  remote: https://rubygems.org/
+  specs:
+    cassandra-driver (3.1.0)
+      ione (~> 1.2)
+    httparty (0.14.0)
+      multi_xml (>= 0.5.2)
+    ione (1.2.4)
+    lz4-ruby (0.3.3)
+    multi_xml (0.6.0)
+
+PLATFORMS
+  ruby
+
+DEPENDENCIES
+  cassandra-driver
+  httparty
+  lz4-ruby
+
+BUNDLED WITH
+   1.13.6
