@@ -186,12 +186,14 @@ def data_stream_example
   insert = session.prepare %[INSERT INTO test(id, val) VALUES(?, ?);]
   100.times {|n| session.execute insert, arguments: [n, n] }
 
-  query = session.prepare 'SELECT nthRecord(val, 2) as val_collection FROM test'
-  result = session.execute query
-
-  puts "maxOf results:"
-  result.rows.each do |row|
-    puts "  " + JSON.generate(row)
+  [2, 3, 4, 5, 6].each do |n|
+    query = session.prepare 'SELECT nthRecord(val, ?) as val_collection FROM test'
+    result = session.execute query, arguments: [n]
+    puts "nth select every #{n} records:"
+    result.rows.each do |row|
+      puts "  " + JSON.generate(row['val_collection'])
+    end
+    puts
   end
 end
 
