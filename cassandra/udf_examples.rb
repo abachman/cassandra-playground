@@ -140,22 +140,22 @@ def data_stream_example
   execute_statement session, 'drop func', 'DROP FUNCTION IF EXISTS nthCollector(tuple<int, list<int>>, int, int);'
 
   execute_statement session, 'create nthCollector function', %[
-    CREATE OR REPLACE FUNCTION nthCollector(state tuple<int, map<int, int>>, current int, nthval int)
+    CREATE OR REPLACE FUNCTION nthCollector(state tuple<int, list<int>>, current int, nthval int)
     CALLED ON NULL INPUT
-    RETURNS tuple<int, map<int, int>>
+    RETURNS tuple<int, list<int>>
     LANGUAGE java
     AS $$
       state.setInt(0, state.getInt(0) + 1);
 
       if (state.getInt(0) % nthval == 0) {
-        Map<Integer, Integer> existing;
-        if (state.getMap(1, Integer.class, Integer.class) == null) {
-          existing = new HashMap<Integer, Integer>();
+        List<Integer> existing;
+        if (state.getList(1, Integer.class) == null) {
+          existing = new ArrayList<Integer>();
         } else {
-          existing = state.getMap(1, Integer.class, Integer.class);
+          existing = state.getList(1, Integer.class);
         }
-        existing.put(state.getInt(0), current);
-        state.setMap(1, existing);
+        existing.add(current);
+        state.setList(1, existing);
       }
 
 
@@ -165,12 +165,12 @@ def data_stream_example
 
 
   execute_statement session, 'create nthFinal function', %[
-    CREATE OR REPLACE FUNCTION nthFinal(state tuple<int, map<int, int>>)
+    CREATE OR REPLACE FUNCTION nthFinal(state tuple<int, list<int>>)
     CALLED ON NULL INPUT
-    RETURNS map<int, int>
+    RETURNS list<int>
     LANGUAGE java
     AS $$
-      return state.getMap(1, Integer.class, Integer.class);
+      return state.getList(1, Integer.class);
     $$;
   ]
 
@@ -178,9 +178,9 @@ def data_stream_example
   execute_statement session, 'create nthRecord aggregate', %[
     CREATE OR REPLACE AGGREGATE nthRecord(int, int)
     SFUNC nthCollector
-    STYPE tuple<int, map<int, int>>
+    STYPE tuple<int, list<int>>
     FINALFUNC nthFinal
-    INITCOND (0, {});
+    INITCOND (0, []);
   ]
 
   insert = session.prepare %[INSERT INTO test(id, val) VALUES(?, ?);]
