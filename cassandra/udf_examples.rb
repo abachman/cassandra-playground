@@ -101,10 +101,122 @@ def sum_of_example
   query = session.prepare 'SELECT sumOfOdd(val) FROM test'
   result = session.execute query
 
+  puts "sumOfOdd result:"
+  result.rows.each do |row|
+    puts "  " + JSON.generate(row)
+  end
+end
+
+# sum_of_example
+def data_stream_example
+  session = connect!
+
+  # CREATE FUNCTION function_name(stateArg type0, arg1 type1)
+  #     RETURNS NULL ON NULL INPUT
+  #     RETURNS type0
+  #     LANGUAGE java
+  #     AS 'return (type0) stateArg + arg1';
+  #
+  # CREATE AGGREGATE aggregate_name(type0)
+  #     SFUNC function_name
+  #     STYPE type0
+  #     FINALFUNC function_name2
+  #     INITCOND null;
+
+  execute_statement session, 'drop table', %[DROP TABLE IF EXISTS test]
+  execute_statement session, 'create table', %[
+    CREATE TABLE test (
+      id int,
+      val int,
+      PRIMARY KEY (id)
+    );
+  ]
+
+
+  execute_statement session, 'create nthCollector function', %[
+    CREATE OR REPLACE FUNCTION sumOfOddFunc(state tuple<int, list<int>>, current int, nthval int)
+    CALLED ON NULL INPUT
+    RETURNS tuple<int, list<int>>
+    LANGUAGE java
+    AS $$
+      state.setInt(0, state.getInt(0) + 1);
+
+      if (state.getInt(0) % nthval == 0) {
+        state.set(1, state.get(1).add(current))
+      }
+
+      return state;
+    $$;
+  ]
+
+
+  execute_statement session, 'create nthFinal function', %[
+    CREATE OR REPLACE FUNCTION nthFinal(state tuple<int, list<int>>)
+    CALLED ON NULL INPUT
+    RETURNS list<int>
+    LANGUAGE java
+    AS $$
+      return state.get(1);
+    $$;
+  ]
+
+
+  execute_statement session, 'create nthRecord aggregate', %[
+    CREATE OR REPLACE AGGREGATE nthRecord(int, int)
+    SFUNC nthCollector
+    STYPE list<int>
+    FINALFUNC nthFinal
+    INITCOND (0, []);
+  ]
+
+  insert = session.prepare %[INSERT INTO test(id, val) VALUES(?, ?);]
+  100.times {|n| session.execute insert, arguments: [n, n] }
+
+  query = session.prepare 'SELECT nthRecord(val, 4) FROM test'
+  result = session.execute query
+
   puts "maxOf results:"
   result.rows.each do |row|
     puts "  " + JSON.generate(row)
   end
 end
 
-sum_of_example
+def row_counter_example
+  session = connect!
+
+  # CREATE FUNCTION function_name(stateArg type0, arg1 type1)
+  #     RETURNS NULL ON NULL INPUT
+  #     RETURNS type0
+  #     LANGUAGE java
+  #     AS 'return (type0) stateArg + arg1';
+  #
+  # CREATE AGGREGATE aggregate_name(type0)
+  #     SFUNC function_name
+  #     STYPE type0
+  #     FINALFUNC function_name2
+  #     INITCOND null;
+
+  execute_statement session, 'drop table', %[DROP TABLE IF EXISTS test]
+  execute_statement session, 'create table', %[
+    CREATE TABLE test (
+      id timeuuid,
+      fid int,
+      val int,
+      fcount int,
+      PRIMARY KEY ((fid), id)
+    ) with clustering order by (id desc);
+  ]
+
+  # counters
+  execute_statement session, 'drop table', %[DROP TABLE IF EXISTS test_counters]
+  execute_statement session, 'create table', %[
+    CREATE TABLE test (
+      fid int,
+      fcount int,
+      PRIMARY KEY (fid)
+    );
+  ]
+
+  insert = session.prepare %[INSERT INTO test(id, fid, val, fcount) VALUES(?, ?);]
+  100.times {|n| session.execute insert, arguments: [n, n] }
+end
