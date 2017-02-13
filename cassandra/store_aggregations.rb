@@ -8,54 +8,48 @@ include Utils
 # Goal: to be able to quickly query up to 100,000 data points for charting data.
 #
 
-session = connect!
+# in n-minute increments
+RELOAD_DATA = ENV['RELOAD'] == 'true'
+AGGREGATION_BUCKETS = [1, 5, 10, 30, 60, 120, 240, 360, 720, 1440]
+DEFAULT_HOURS_AGGREGATION = {
+  1    => 1,
+  2    => 1,
+  3    => 1,
+  4    => 1,
+  6    => 1,
+  8    => 1,
+  16   => 5,
+  24   => 5,    # 1d
+  48   => 10,   # 2
+  168  => 30,   # 7
+  336  => 60,   # 14
+  720  => 120,  # 30
+  1440 => 240,  # 60
+  2160 => 360,  # 90
+  4320 => 720,  # 180
+  8760 => 1440  # 365
+}
 
-execute_statement session, 'drop table', %[DROP TABLE IF EXISTS test_data]
-execute_statement session, 'create table', %[
-  CREATE TABLE test_data (
-    id timeuuid,
-    fid int,
-    val double,
-    ctime timestamp,
-    PRIMARY KEY ((fid), id)
-  ) WITH CLUSTERING ORDER BY(id DESC);
-]
+if RELOAD_DATA
+  # generate schema
+  dir = File.dirname(File.absolute_path(__FILE__))
+  spath = File.join dir, 'aggregation_schema.cql'
 
-
-execute_statement session, 'drop table', %[DROP TABLE IF EXISTS test_data_updated]
-execute_statement session, 'create table', %[
-  CREATE TABLE test_data_updated (
-    minute timestamp,
-    fid int,
-    PRIMARY KEY ((minute), fid)
-  );
-]
-
-
-execute_statement session, 'drop agg table', %[DROP TABLE IF EXISTS test_data_aggregations]
-execute_statement session, 'create agg table', %[
-  CREATE TABLE test_data_aggregations (
-    fid int,
-    aggregate int,
-    val double,
-    slice timestamp,
-    PRIMARY KEY ((fid, aggregate), slice)
-  ) WITH CLUSTERING ORDER BY(slice desc);
-]
-
-
-def time_floor(time, offset)
-  Time.at(time - (time.to_i % offset))
+  puts "run script at #{spath}"
+  `cqlsh -f #{spath}`
 end
 
-# Time is sliced like this:
-#   2: |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |  |
-#   4: |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |     |
-#   8: |           |           |           |           |           |           |           |           |
-#  16: |                       |                       |                       |                       |
-#  32: |                                               |                                               |
-#  64: |                                                                                               |
-# 127: | etc.
+def time_floor(time, offset_in_seconds)
+  Time.at(time - (time.to_i % offset_in_seconds))
+end
+
+# Time is sliced into compatibly sized buckets, like so:
+#   1: | | | | | | | | | | | | | | | | | | | | | | | | | | | | | | |
+#   5: |         |         |         |         |         |         |
+#  10: |                   |                   |                   |
+#  30: |                                                           |
+#  60: | etc.
+# 120: |
 # 256: |
 #
 # Data is received continuously and data for the preceeding chunk is rolled up
@@ -64,214 +58,257 @@ end
 #   * = rollup process runs
 #   - = minutes batched
 #
-#                   *
-#   2: |--|--|--|--|  |  |  |  | ...
-#   4: |-- --|-- --|     |     |
-#   8: |-- -- -- --|           |
-#  16: |                       |
+#                           *
+#   1: |-|-|-|-|-|-|-|-|-|-| | | | | | | | | | | | | | | | | | | | |
+#   5: |---------|---------|         |         |         |         |
+#  10: |-------------------|                   |                   |
+#  30: |                                                           |
+#  60: | etc.
+# 120: |
+# 256: |
 #
-# Since the rollup job triggered in the middle of a 16 minute block, it is not
-# rolled up. It will get picked up _after_ the 16 minute block has completed.
+# Since the rollup job triggered in the middle of a 30 minute bucket, that data
+# isn't aggregated yet. It will get picked up _after_ the 30 minute block has
+# completed.
 def update_aggregates(session, feed, time_step, time)
-
-  puts "UPDATE AGGREGATES AT #{ time }"
-
-  # check if exists
-  select = session.prepare %[select val from test_data_aggregations where fid=? and aggregate=? and slice=?]
-  # create
-  insert = session.prepare %[INSERT INTO test_data_aggregations (fid, aggregate, val, slice) VALUES (:fid, :agg, :val, :slice) USING TTL :ttl]
-  # accumulate
-  gather = session.prepare %[select val from test_data where fid = :fid AND id > minTimeuuid(:start_time) AND id < maxTimeuuid(:end_time)]
-
   batch = session.batch do |b|
-    [2, 4, 8, 16, 32, 64, 128, 256].each do |agg_factor|
-      span = time_step * agg_factor
+    prev_span = nil
+    AGGREGATION_BUCKETS.each do |span|
+      span_in_seconds = span * 60
 
-      # the end of the previous slice
-      slice_ending_at = time_floor(time, span)
+      # The end of the previous slice for this aggregation bucket. All buckets
+      # are aligned on the start of Unix epoch time.
+      slice_ending_at = time_floor(time, span_in_seconds)
 
-      existing = session.execute(select, arguments: [feed, agg_factor, slice_ending_at])
+      select = session.prepare %[select val from data_aggregate_#{span} where fid=? and slice=?]
+      existing = session.execute(select, arguments: [feed, slice_ending_at])
 
       # if no roll-up has been calculated, do it now
       if existing.rows.size === 0
         args = {
           fid: feed,
-          agg: agg_factor,  # how many data points are being aggregated?
-          slice: slice_ending_at, # a slice is a collection of data points up to the end time
-          ttl: 1000 * span  # store at most 1000 data points for the given time span
+          # a slice is a collection of data points up to the end time
+          slice: slice_ending_at,
+          # Store at most 1000 data points for the given time span.
+          # Alternatively, we could set TTL to the same as the Feed storage
+          # length (7 day, 1 year, etc.) if we want to support ranged queries.
+          ttl: 1000 * span
         }
 
         # the beginning of the previous slice
-        slice_start = slice_ending_at - span
+        slice_start = slice_ending_at - span_in_seconds
 
-        # select all data received in the slice
-        results = session.execute(gather, arguments: {fid: feed, start_time: slice_start, end_time: slice_ending_at})
-        r_count = results.rows.size
-        next if r_count === 0
+        if prev_span
+          # gather from previous aggregation
+          gather = session.prepare %[select val, loc, val_count, sum, max, min, avg
+                                     from data_aggregate_#{prev_span}
+                                     where fid = :fid AND slice >= :slice_start AND slice <= :slice_end]
 
-        sum = results.rows.map {|r| r['val']}.inject(0) {|memo, obj| memo + obj}
-        avg = sum / (r_count * 1.0)
+          results = session.execute(gather, arguments: {fid: feed, slice_start: slice_start, slice_end: slice_ending_at})
 
-        args[:val] = avg
+          r_count = results.rows.size
+          prev_span = span
+          next if r_count === 0
 
-        puts "  INSERT FOR FACTOR %3im%20.4f UP TO %s" % [agg_factor / 2, avg, slice_ending_at]
+          last_val = nil
+          last_loc = nil
+
+          # calculate
+          sum = 0
+          count = 0
+          max = -Float::INFINITY
+          min = Float::INFINITY
+
+          results.rows.each do |row|
+            sum += row['sum']
+            count += row['val_count']
+            min = min < row['min'] ? min : row['min']
+            max = max > row['max'] ? max : row['max']
+            last_val = row['val']
+            last_loc = row['loc']
+          end
+          avg = sum / count
+
+        else
+          # select all data received in the slice
+          gather = session.prepare %[select val, loc from data where fid = :fid AND id > minTimeuuid(:slice_start) AND id < maxTimeuuid(:slice_end)]
+          results = session.execute(gather, arguments: {fid: feed, slice_start: slice_start, slice_end: slice_ending_at})
+
+          r_count = results.rows.size
+          prev_span = span
+          next if r_count === 0
+
+          last_val = nil
+          last_loc = nil
+          sum = 0
+          count = 0
+          max = -Float::INFINITY
+          min = Float::INFINITY
+
+          results.rows.each do |row|
+            sum += row['val']
+            count += 1
+            min = min < row['val'] ? min : row['val']
+            max = max > row['val'] ? max : row['val']
+            last_val = row['val']
+            last_loc = row['loc']
+          end
+          avg = sum / (count * 1.0)
+        end
+
+        args[:val] = last_val
+        args[:loc] = last_loc
+        args[:sum] = sum
+        args[:avg] = avg
+        args[:val_count] = count
+        args[:min] = min
+        args[:max] = max
+
+        puts "  INSERT FOR %4im AGGREGATION FROM %s TO %s" % [span, slice_start, slice_ending_at]
+        insert = session.prepare %[INSERT INTO data_aggregate_#{span} (fid, val, loc, val_count, sum, min, max, avg, slice)
+                                   VALUES (:fid, :val, :loc, :val_count, :sum, :min, :max, :avg, :slice) USING TTL :ttl]
         b.add insert, arguments: args
       end
     end
   end
 
-  return if batch.statements.size === 0
+  return 0 if batch.statements.size === 0
 
   session.execute batch, consistency: :all
+
+  return batch.statements.size
 end
 
-
-def insert_data(session, feed, time, value)
+# returns Time value from just before start of data
+def batch_insert_data(session, start_time)
   gen = Cassandra::Uuid::Generator.new
+  stmt = session.prepare %[INSERT INTO data (id, fid, val, loc, ctime) VALUES (?, ?, ?, ?, ?)]
 
-  stmt = session.prepare %[INSERT INTO test_data (id, fid, val, ctime) VALUES (?, ?, ?, ?)]
-  session.execute stmt, arguments: [gen.at(time), feed, value, time]
+  time_step = 30 # seconds
+  points = 1000
+  value = 50.0
+  loc = [-40.000, 40.000, 100.0]
 
-  # if we trigger an update on every insert, that causes excessive rewrites to existing accumulations
-  # update_aggregates(session, feed, 30, time, value)
-end
+  curr_time = start_time - (time_step * points)
 
-# get_charting_data "intelligently" selects an aggregation size that aims to
-# get the given number of records over the given time range.
-def get_charting_data(session, feed, start_time, end_time, requested_points)
-  puts "CHART #{ feed } FROM #{ start_time } TO #{ end_time } GET #{ requested_points } POINTS"
-  gen = Cassandra::Uuid::Generator.new
+  start = Time.now
+  puts "inserting #{points} records, one every #{time_step}s"
 
-  start_id = gen.at(start_time)
-  end_id = gen.at(end_time)
+  # INSERT test data over a 3 day period, 30-second throttle
+  batch = session.batch do |b|
+    points.times do |n|
+      # random walk
+      value = value + (rand() * 4) - 2
+      loc   = loc.map {|v| v + (rand() * 0.01) - 0.05}
 
-  # count available points in range
-  counter = session.prepare %[SELECT count(*) from test_data WHERE fid = ? AND id >= ? AND id <= ?]
-  count   = session.execute(counter, arguments: [feed, start_id, end_id]).rows.first['count']
-  aggregate_by = nil
+      gen = Cassandra::Uuid::Generator.new
 
-  # adjust aggregate factor as necessary
-  if count > requested_points
-    [2, 4, 8, 16, 32, 64, 128, 256].each do |agg|
-      aggregate_by = agg
-      break if (count / aggregate_by) <= requested_points
+      b.add stmt, arguments: [gen.at(curr_time), 1, value, Cassandra::Tuple.new(*loc), curr_time]
+
+      # simulate the passage of time
+      curr_time = curr_time + time_step
     end
-
-    puts "  AGGREGATE BY FACTOR OF #{ aggregate_by }"
-  else
-    puts "  NO AGGREGATION FACTOR, COUNTED #{ count } REQUESTED #{ requested_points }"
   end
+  session.execute batch, consistency: :all
 
-  # prepare default params
-  params = {
-    fid: feed
-  }
+  return curr_time - 1
+end
 
-  # query
-  if aggregate_by
-    query = session.prepare('select slice as ctime, val
-                             from test_data_aggregations
-                             where fid = :fid AND aggregate = :agg AND
-                               slice >= :start_time AND slice <= :end_time')
-    params[:agg] = aggregate_by
-    params[:start_time] = time_floor(start_time, aggregate_by * 30) - 1
-    params[:end_time] = end_time
-  else
-    query = session.prepare('select dateOf(id) as ctime, val from test_data
-                             where fid = :fid AND id > minTimeuuid(:start_time) AND id < maxTimeuuid(:end_time)')
-    params[:start_time] = start_time
-    params[:end_time] = end_time
+def get_charting_data(session, feed, chart_hours)
+  aggregation_bucket = DEFAULT_HOURS_AGGREGATION[chart_hours]
+  limit = (chart_hours * 60) / aggregation_bucket
+  puts "  getting #{ limit} records"
 
-    puts "  PARAMS #{ params }"
+  query = session.prepare "SELECT avg as val, slice as ctime FROM data_aggregate_#{ aggregation_bucket } LIMIT #{ limit }"
+  session.execute(query)
+end
+
+def get_mapping_data(session, feed, chart_hours)
+  aggregation_bucket = DEFAULT_HOURS_AGGREGATION[chart_hours]
+  limit = (chart_hours * 60) / aggregation_bucket
+  puts "  getting #{ limit} records"
+
+  query = session.prepare "SELECT val, loc, slice as ctime FROM data_aggregate_#{ aggregation_bucket } LIMIT #{ limit }"
+  result = session.execute(query)
+end
+
+# def delete_data_point
+# end
+#
+# def update_data_point
+# end
+
+def timed message
+  start = Time.now
+  puts message
+  yield
+  puts "-- in #{ Time.now - start}\n\n"
+end
+session = connect!
+
+if RELOAD_DATA
+  timed "INSERT BATCH DATA" do
+    batch_insert_data(session, Time.now)
   end
-
-  result = session.execute(query, arguments: params)
 end
 
-def delete_data_point
+res = session.execute "SELECT id FROM data WHERE fid = 1 ORDER BY id ASC LIMIT 1"
+earliest = res.rows.first['id'].to_time
+
+puts "DATA STARTS AT #{earliest}"
+
+# ---------------
+
+if RELOAD_DATA
+  timed "UPDATE AGGREGATES" do
+    update_count = 0
+    curr_time = earliest + 5 # make sure we're offset from data points insert times
+    while curr_time < (Time.now + 60)
+      timed "aggregator runs at #{ curr_time }" do
+        update_count += update_aggregates(session, 1, 30, curr_time)
+      end
+
+      # simulate the passage of time
+      curr_time = curr_time + 60
+    end
+  end
 end
-
-def update_data_point
-end
-
-value = 50.0
-curr_time = Time.now - 3000
-earliest = curr_time - 1
-
-start = Time.now
-puts "inserting 1000 records, one every 10s"
-1000.times do |n|
-  insert_data session, 1, curr_time, value
-  value = value + (rand() * 4) - 2
-  # simulate the passage of time
-  curr_time = curr_time + 10
-end
-puts "-- in #{ Time.now - start }"
-
-end_time = curr_time
-curr_time = earliest + 1 # offset a smidge
-
-start = Time.now
-puts "updating aggregates, once every 60s"
-
-update_count = 0
-while curr_time < end_time
-  # def update_aggregates(session, feed, time_step, time)
-  update_aggregates(session, 1, 30, curr_time)
-
-  # simulate the passage of time
-  curr_time = curr_time + 60
-  update_count += 1
-end
-puts "-- #{ update_count } updates in #{ Time.now - start }"
-puts
 
 def show_results(results)
   col_names = []
-  rowfmt = "%30s%30s"
+  rowfmt = "%30s%30s%60s"
 
-  puts rowfmt % ['ctime', 'val']
-  puts("-" * 60)
+  puts rowfmt % ['ctime', 'val', 'loc']
+  puts("-" * 120)
   results.rows.each do |row|
-    puts rowfmt % [row['ctime'], row['val']]
+    puts rowfmt % [row['ctime'], row['val'], row['loc']]
   end
   puts
   puts
 end
 
-puts
-puts "___________"
-puts "-----------"
-puts
-
-collection = []
-start = Time.now
-50.times do
-  inner_start = Time.now
-  agg = [2, 4, 8, 16, 32, 64, 128, 256].sample
-  res = session.execute "select slice as ctime, fid, val from test_data_aggregations where fid = 1 AND aggregate = #{agg}"
-  collection << [
-    res.size,
-    Time.now - inner_start
-  ]
+def to_json(results)
+  cols = results.rows.first.keys
+  data = {
+    columns: cols,
+    data: results.rows.map {|row|
+      cols.map {|c| row[c]}
+    }
+  }
+  JSON.generate(data)
 end
 
-puts "50 selects from test_data_aggregations in #{ Time.now - start }"
-collection.each do |(sz, tm)|
-  puts "  %8i%8.4f" % [sz, tm]
+valid_chart_hours = DEFAULT_HOURS_AGGREGATION.keys.sort
+
+[1, 4, 8, 24, 168, 720, 4320, 8760].each do |len|
+  timed "GET #{len}h CHART" do
+    data = get_charting_data session, 1, len
+    js = to_json(data)
+    puts "  #{ js.size } bytes"
+  end
 end
 
-#
-# a = get_charting_data session, 1, earliest, Time.now, 32
-# b = get_charting_data session, 1, earliest, Time.now, 2
-# c = get_charting_data session, 1, earliest, Time.now, 1000
-# d = get_charting_data session, 1, earliest, Time.now, 300
-# puts "A #{ a.rows.size }"
-# show_results(a)
-# puts "B #{ b.rows.size }"
-# show_results(b)
-# puts "C #{ c.rows.size }"
-# show_results(c)
-# puts "D #{ d.rows.size }"
-# show_results(d)
-
+#timed "GET h MAP" do
+#  data = get_mapping_data session, 1, 720
+#  # show_results(data)
+#end
