@@ -156,7 +156,7 @@ By detaching charting from the speed at which data accumulates, we can set throt
 
 ### Other kinds of aggregation
 
-nth record queries on a rolling basis should be possible. Basically, anything that we want to come out in a chart we can write as an async, eventually consistent worker separate from the raw data insert.
+nth record queries on a rolling basis should be possible. Basically, anything that we want to come out in a chart we can write as an async, eventually consistent cache-building worker separate from the raw data insert.
 
 # Updating IO Production
 

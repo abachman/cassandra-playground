@@ -45,15 +45,41 @@ CREATE TABLE IF NOT EXISTS iotest.data_by_timeuuid_fid (
 ]
 execute_statement session, 'create (fid) table', table_create
 
-## MAPPED TABLE SCHEMA
-#
-# map_data_create = %[
-# CREATE TABLE IF NOT EXISTS iotest.mapped_data_by_timeuuid (
-#   fid int,
-#   date timestamp,
-#   values map<timeuuid, text>,
-#   PRIMARY KEY ((uid, fid), id)
-# ) WITH CLUSTERING ORDER BY (id DESC);
-# ]
-# execute_statement session, 'create mapped table', map_data_create
-#
+## AGGREGATE TABLE SCHEMA with range indexes
+table_create = %[
+CREATE TABLE IF NOT EXISTS iotest.data_by_timeuuid_agg (
+  id timeuuid,
+  fid int,
+  val text,
+  val_num decimal,
+  ctime timestamp,
+  mtime timestamp,
+  loc frozen <tuple <double, double, double>>,
+
+  aggregation_2 timestamp,
+  aggregation_4 timestamp,
+  aggregation_8 timestamp,
+  aggregation_64 timestamp,
+  aggregation_128 timestamp,
+  aggregation_256 timestamp,
+  aggregation_512 timestamp,
+  aggregation_768 timestamp,
+  aggregation_1536 timestamp,
+  aggregation_3072 timestamp,
+
+  PRIMARY KEY ((fid), id)
+) WITH CLUSTERING ORDER BY (id DESC);
+]
+execute_statement session, 'drop agg table', 'DROP TABLE IF EXISTS iotest.data_by_timeuuid_agg;'
+execute_statement session, 'create (agg) table', table_create
+
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_2 ON data_by_timeuuid_agg (aggregation_2); ]
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_4 ON data_by_timeuuid_agg (aggregation_4); ]
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_8 ON data_by_timeuuid_agg (aggregation_8); ]
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_64 ON data_by_timeuuid_agg (aggregation_64); ]
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_128 ON data_by_timeuuid_agg (aggregation_128); ]
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_256 ON data_by_timeuuid_agg (aggregation_256); ]
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_512 ON data_by_timeuuid_agg (aggregation_512); ]
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_768 ON data_by_timeuuid_agg (aggregation_768); ]
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_1536 ON data_by_timeuuid_agg (aggregation_1536); ]
+execute_statement session, 'create index', %[ CREATE INDEX IF NOT EXISTS data_by_3072 ON data_by_timeuuid_agg (aggregation_3072); ]

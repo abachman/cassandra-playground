@@ -158,7 +158,6 @@ def data_stream_example
         state.setList(1, existing);
       }
 
-
       return state;
     $$;
   ]

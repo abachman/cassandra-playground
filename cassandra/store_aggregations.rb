@@ -93,10 +93,9 @@ def update_aggregates(session, feed, time_step, time)
           fid: feed,
           # a slice is a collection of data points up to the end time
           slice: slice_ending_at,
-          # Store at most 1000 data points for the given time span.
-          # Alternatively, we could set TTL to the same as the Feed storage
+          # We could set TTL to the same as the Feed storage
           # length (7 day, 1 year, etc.) if we want to support ranged queries.
-          ttl: 1000 * span
+          ttl: (7 * 24 * 60 * 60)
         }
 
         # the beginning of the previous slice

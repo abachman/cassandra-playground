@@ -18,20 +18,25 @@ TABLE_NAME = 'data_by_timeuuid'
 # ) WITH CLUSTERING ORDER BY (id DESC);
 #
 
-# add 1000 data points, 1 per second-ish
-
-start = Time.now
-
+generator = Cassandra::Uuid::Generator.new
 user_id = 1
 feed_id = 1
 value = 50
+
+# add 1000 data points, 1 per second-ish
+
 batches = 50
 per_batch = 1000
+
+start = Time.now
+
 count = batches * per_batch
 ttl = 2592000
-curr_time = Time.now - count
+
+# 30 days ago
+curr_time = Time.now - (30 * 24 * 60 * 60)
 earliest = curr_time
-generator = Cassandra::Uuid::Generator.new
+
 results = []
 
 if DO_INSERT
@@ -59,8 +64,10 @@ if DO_INSERT
           arguments: params
         )
 
-        # walk values
-        curr_time += 1 + (((rand() * 2) - 1) / 10)
+        # walk time forward in 30s increments w/ small jitter
+        curr_time += 30 + (((rand() * 2) - 1) / 10)
+
+        # walk value randomly
         value += (rand() * 2) - 1
       end
     end
