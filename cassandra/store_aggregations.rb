@@ -70,6 +70,10 @@ end
 # Since the rollup job triggered in the middle of a 30 minute bucket, that data
 # isn't aggregated yet. It will get picked up _after_ the 30 minute block has
 # completed.
+#
+# Normally this work would be bundled up in a job / async worker and the `time`
+# argument would be provided by the system clock. So, as long as the aggregate
+# builder runs each minute, all buckets will remain filled
 def update_aggregates(session, feed, time_step, time)
   batch = session.batch do |b|
     prev_span = nil
@@ -232,17 +236,17 @@ def get_mapping_data(session, feed, chart_hours)
   result = session.execute(query)
 end
 
-# def delete_data_point
+# given a data point uuid, update the raw data and aggregations tables
+# def delete_data_point(session, uuid)
 # end
-#
-# def update_data_point
+# def update_data_point(session, uuid, value)
 # end
 
 def timed message
   start = Time.now
   puts message
   yield
-  puts "-- in #{ Time.now - start}\n\n"
+  puts "in %.2fms\n\n" % [(Time.now - start) * 1000.0]
 end
 session = connect!
 
@@ -255,7 +259,9 @@ end
 res = session.execute "SELECT id FROM data WHERE fid = 1 ORDER BY id ASC LIMIT 1"
 earliest = res.rows.first['id'].to_time
 
+puts
 puts "DATA STARTS AT #{earliest}"
+puts
 
 # ---------------
 
@@ -275,6 +281,8 @@ if RELOAD_DATA
 end
 
 def show_results(results)
+  return if results.rows.size === 0
+
   col_names = []
   rowfmt = "%30s%30s%60s"
 
@@ -288,6 +296,7 @@ def show_results(results)
 end
 
 def to_json(results)
+  return JSON.generate({columns: [], data: []}) if results.rows.size === 0
   cols = results.rows.first.keys
   data = {
     columns: cols,
@@ -304,6 +313,7 @@ valid_chart_hours = DEFAULT_HOURS_AGGREGATION.keys.sort
   timed "GET #{len}h CHART" do
     data = get_charting_data session, 1, len
     js = to_json(data)
+    puts "  #{ js.slice(0, 90) }..."
     puts "  #{ js.size } bytes"
   end
 end
